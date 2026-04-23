@@ -9,8 +9,8 @@ from semantic import SemanticChecker
 def run_semantic_test():
     programs = {
         "Program 1 (Correct)": """\
-x = 5
-y = x
+x = 5 + 3
+y = x * 2
 print(y)
 """,
         "Program 2 (Undeclared variable)": """\
