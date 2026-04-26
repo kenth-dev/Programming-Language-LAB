@@ -11,85 +11,87 @@ from parser import (
 )
 
 
-# ── Symbol Table ─────────────────────────────────────────────────────────────
+# ── Symbol Table ─────────────────────────────────────────────────
 
 class SymbolTable:
     def __init__(self):
-        self.table = {}  # { name: { "line": int, "initialized": bool } }
+        # A stack of dictionaries. Each dict is one scope.
+        # We start with one global scope.
+        self.scope_stack = [{}]
+
+    def enter_scope(self):
+        """Push a new empty scope onto the stack."""
+        self.scope_stack.append({})
+        print(f"  [Scope] Entered new scope. Depth: {len(self.scope_stack)}")
+
+    def exit_scope(self):
+        """Pop the current scope off the stack."""
+        if len(self.scope_stack) > 1:
+            exited = self.scope_stack.pop()
+            print(f"  [Scope] Exited scope. Variables in scope: {list(exited.keys())}. Depth: {len(self.scope_stack)}")
+        else:
+            raise Exception("SemanticError: Cannot exit global scope.")
 
     def declare(self, name, line):
-        """Add a variable to the table. Error if already declared."""
-        if name in self.table:
+        """Declare a variable in the current (innermost) scope."""
+        current_scope = self.scope_stack[-1]
+        if name in current_scope:
             raise Exception(
                 f"SemanticError [line {line}]: "
-                f"Variable '{name}' is already declared."
+                f"Variable '{name}' is already declared in this scope."
             )
-        self.table[name] = {"line": line, "initialized": False}
+        current_scope[name] = { "line": line, "initialized": False }
+        print(f"  [Symbol] Declared '{name}' in scope depth {len(self.scope_stack)}")
 
     def lookup(self, name):
-        """Return the variable entry or None if not found."""
-        return self.table.get(name, None)
+        """Search for a variable from innermost to outermost scope."""
+        for scope in reversed(self.scope_stack):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def is_declared(self, name):
+        """Check if a variable exists in any scope."""
+        return self.lookup(name) is not None
 
     def set_initialized(self, name):
-        """Mark a variable as assigned/initialized."""
-        if name in self.table:
-            self.table[name]["initialized"] = True
+        """Mark a variable as initialized in whichever scope it lives in."""
+        for scope in reversed(self.scope_stack):
+            if name in scope:
+                scope[name]["initialized"] = True
+                return
 
     def is_initialized(self, name):
         """Check if a variable has been assigned a value."""
-        entry = self.table.get(name, None)
+        entry = self.lookup(name)
         if entry is None:
             return False
         return entry["initialized"]
 
+# ── Semantic Checker ─────────────────────────────────────────────
 
-# ── Semantic Checker ─────────────────────────────────────────────────────────
+from parser import (ProgramNode, AssignmentNode, IfNode, WhileNode,
+                    PrintNode, ConditionNode, BinaryOpNode,
+                    NumberNode, IdentifierNode)
 
 class SemanticChecker:
     def __init__(self):
         self.symbol_table = SymbolTable()
-        self.errors = []
+        self.errors       = []
 
     def error(self, msg):
-        """Record a semantic error."""
+        """Record and print a semantic error."""
         self.errors.append(msg)
-        print(msg)
+        print(f"  ❌ {msg}")
 
     def check(self, node):
         """Entry point — start walking the AST from the root."""
-        self.predeclare_assignments(node)
         self.visit(node)
+        print()
         if not self.errors:
-            print("Semantic analysis passed. No errors found.")
-
-    def predeclare_assignments(self, node):
-        """Declare all assignment targets before semantic checks."""
-        if isinstance(node, ProgramNode):
-            for stmt in node.statements:
-                self.predeclare_assignments(stmt)
-        elif isinstance(node, AssignmentNode):
-            if self.symbol_table.lookup(node.name) is None:
-                self.symbol_table.declare(node.name, line=0)
-            self.predeclare_assignments(node.value)
-        elif isinstance(node, IfNode):
-            self.predeclare_assignments(node.condition)
-            for stmt in node.then_branch:
-                self.predeclare_assignments(stmt)
-            if node.else_branch:
-                for stmt in node.else_branch:
-                    self.predeclare_assignments(stmt)
-        elif isinstance(node, WhileNode):
-            self.predeclare_assignments(node.condition)
-            for stmt in node.body:
-                self.predeclare_assignments(stmt)
-        elif isinstance(node, PrintNode):
-            self.predeclare_assignments(node.expression)
-        elif isinstance(node, ConditionNode):
-            self.predeclare_assignments(node.left)
-            self.predeclare_assignments(node.right)
-        elif isinstance(node, BinaryOpNode):
-            self.predeclare_assignments(node.left)
-            self.predeclare_assignments(node.right)
+            print("  ✅ Semantic analysis passed. No errors found.")
+        else:
+            print(f"  ⚠️  Semantic analysis finished with {len(self.errors)} error(s).")
 
     def visit(self, node):
         """Dispatch to the correct visitor based on node type."""
@@ -110,7 +112,7 @@ class SemanticChecker:
         elif isinstance(node, IdentifierNode):
             self.visit_identifier(node)
         elif isinstance(node, NumberNode):
-            pass
+            pass  # Numbers are always valid
         else:
             self.error(f"SemanticError: Unknown node type {type(node)}")
 
@@ -121,18 +123,24 @@ class SemanticChecker:
 
     def visit_assignment(self, node):
         """
-        Rule 1 & 2: Declare the variable if first time seen,
-        then check the value expression.
+        Rule 1 & 2: Check the right-hand side first,
+        then declare and initialize the variable.
         """
+        # Check the right-hand side expression first
         self.visit(node.value)
+
+        # Declare in current scope if not yet declared
+        if not self.symbol_table.is_declared(node.name):
+            self.symbol_table.declare(node.name, line=0)
+
+        # Mark as initialized
         self.symbol_table.set_initialized(node.name)
 
     def visit_identifier(self, node):
         """
-        Rule 1 & 3: Check variable is declared and initialized before use.
+        Rule 1 & 3: Variable must be declared and initialized before use.
         """
-        entry = self.symbol_table.lookup(node.name)
-        if entry is None:
+        if not self.symbol_table.is_declared(node.name):
             self.error(
                 f"SemanticError: Variable '{node.name}' is used "
                 f"but has never been declared."
@@ -145,22 +153,34 @@ class SemanticChecker:
 
     def visit_if(self, node):
         """
-        Rule 5: Check condition is valid, then visit both branches.
+        Rule 5: Check condition, then visit branches in their own scopes.
         """
         self.visit(node.condition)
+
+        # Then branch gets its own scope
+        self.symbol_table.enter_scope()
         for stmt in node.then_branch:
             self.visit(stmt)
+        self.symbol_table.exit_scope()
+
+        # Else branch gets its own scope
         if node.else_branch:
+            self.symbol_table.enter_scope()
             for stmt in node.else_branch:
                 self.visit(stmt)
+            self.symbol_table.exit_scope()
 
     def visit_while(self, node):
         """
-        Rule 5: Check condition is valid, then visit the body.
+        Rule 5: Check condition, then visit body in its own scope.
         """
         self.visit(node.condition)
+
+        # While body gets its own scope
+        self.symbol_table.enter_scope()
         for stmt in node.body:
             self.visit(stmt)
+        self.symbol_table.exit_scope()
 
     def visit_print(self, node):
         """Check the expression inside print is valid."""
@@ -168,7 +188,7 @@ class SemanticChecker:
 
     def visit_condition(self, node):
         """
-        Rule 4: Both sides of a condition must be valid numeric expressions.
+        Rule 4: Both sides of condition must be valid numeric expressions.
         """
         valid_ops = [">", "<", ">=", "<=", "==", "!="]
         if node.operator not in valid_ops:
